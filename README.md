@@ -151,7 +151,7 @@ search the transcriptions, and says so.
 
 ## Checking it works
 
-These were not run against a live cluster — verify in this order:
+Run these after any import; they are what confirmed the first one:
 
 ```bash
 # 1. the index exists and carries the analyzer
@@ -175,8 +175,4 @@ Then in the browser: type in the catalogue box and watch the facet counts move;
 switch to text search and click a hit — it should open that manuscript at that
 page with the line outlined and the words marked.
 
-## Loose end
-
-`data/search/` — the old browser-side index, 177 MB in 14,572 files — is no
-longer read by anything. It is still in the repository because deleting that
-many tracked files is your call, not mine.
+`data/` is the importer's input, not a web asset: nginx never has to serve it.
