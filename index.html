@@ -183,6 +183,10 @@
     display:none;grid-template-columns:250px 1fr;overflow:hidden;
   }
   body.browsing #browse{display:grid}
+  /* Text search has no facets. Give the results the whole width rather than
+     hiding the panel and leaving its column behind. */
+  body.textmode #browse{grid-template-columns:1fr}
+  body.textmode #facets{display:none}
   #facets{
     border-right:1px solid var(--rule);overflow-y:auto;padding:14px 12px;
     background:var(--panel);
@@ -368,7 +372,7 @@ document.getElementById('nClose').onclick = ()=>{
   // If nothing is on the stage, go back to where the reader came from rather
   // than leaving them looking at an empty frame.
   if (!viewer || !viewer.world || !viewer.world.getItemCount()){
-    if (corpus.length) document.body.classList.add('browsing');
+    if (corpusCount) document.body.classList.add('browsing');
   }
 };
 
@@ -434,6 +438,31 @@ function render(){
   const im = document.getElementById('imgSrc');
   if (im) im.textContent = imageMode;
   applyOpacity();
+  applyFocusLine();
+}
+
+/* A search hit names the line it found, not just the page. Folding in the
+   index is a shade more forgiving than the marking done here, so a line can
+   match in Elasticsearch and still not light up: this puts the reader on the
+   right line either way. Consumed once, so paging on does not drag the mark
+   along. */
+function applyFocusLine(){
+  if (focusLine === null) return;
+  const ln = lines[focusLine];
+  focusLine = null;
+  if (!ln) return;
+
+  const i = visibleLines().indexOf(ln);
+  if (i < 0) return;
+
+  const o = overlays[i];
+  if (o) o.el.classList.add('found');
+  const row = document.querySelector('.fline[data-i="' + i + '"]');
+  if (row){
+    row.classList.add('found');
+    row.scrollIntoView({block:'center'});
+  }
+  panTo(ln);
 }
 
 function renderOverlay(){
@@ -752,9 +781,8 @@ async function openBundlePage(i){
   } else if (data.iiif){
     notice('This page has no Gallica address',
       'Its address reads <code>' + data.iiif + '</code> \u2014 the manuscript identifier is '
-      + 'missing, so there is nothing to fetch. This folder was built before the Gallica '
-      + 'mapping existed. Rebuild it with <code>build_corpus.py</code>, or pass '
-      + '<code>--mapping</code> to the converter.');
+      + 'missing, so there is nothing to fetch. This page was transcribed before the '
+      + 'Gallica mapping existed; rebuilding the corpus and re-importing it would fix it.');
     setStatus('no image address', 'bad');
     return;
   } else {
@@ -817,7 +845,7 @@ function onRemoteFailed(){
   }
 
   setStatus('Gallica did not respond', 'bad');
-  if (corpus.length) document.body.classList.add('browsing');
+  if (corpusCount) document.body.classList.add('browsing');
   notice('Gallica did not return this image',
     'Neither the tiled service nor the flat image loaded.<br><br>'
     + 'BnF limits how quickly its image server may be called, so this can happen '
@@ -862,10 +890,11 @@ document.getElementById('pagesel').addEventListener('change', e=>openBundlePage(
    can be searched entirely in the page. The transcribed text is far too
    large for that and is fetched per manuscript instead.
 --------------------------------------------------------------------- */
-let corpus = [];            // manuscript records from index-meta.json
+let corpus = [];            // the records currently listed
+let localCorpus = [];       // the whole catalogue of a picked folder, offline
+let corpusCount = 0;        // how many manuscripts are there to search at all
 let facets = {};
 let active = {};            // facet -> Set of chosen values
-let corpusFolder = null;    // the picked directory, for opening a manuscript
 
 const NIQQUD = /[\u0591-\u05C7]/g;
 function fold(s){
@@ -883,10 +912,11 @@ function loadIndex(files){
   if (!meta) return false;
   meta.text().then(t=>{
     const d = JSON.parse(t);
-    corpus = (d.manuscripts || []).map(m => {
+    localCorpus = (d.manuscripts || []).map(m => {
       const parts = String(m.id||'').split('_');
       return Object.assign({}, m, { ie: parts.length > 1 ? parts.pop() : null });
     });
+    corpusCount = localCorpus.length;
     facets = d.facets || {};
     buildFacets();
     runSearch();
@@ -896,6 +926,10 @@ function loadIndex(files){
 
 function buildFacets(){
   const box = document.getElementById('facets');
+  // Counts change with every search, so this panel is redrawn constantly. Hold
+  // the scroll position, or choosing a subject halfway down throws the reader
+  // back to the top of the list.
+  const wasAt = box.scrollTop;
   box.innerHTML = '';
   const labels = {script:'Script', language:'Language', genre:'Genre', subject:'Subject'};
   for (const key of ['script','language','genre','subject']){
@@ -904,11 +938,22 @@ function buildFacets(){
     const h = document.createElement('h4');
     h.textContent = labels[key];
     box.appendChild(h);
-    vals.slice(0,25).forEach(([v,n])=>{
+
+    // A chosen value whose count has dropped out of the top of the list must
+    // still be shown, or there would be no way to switch it off again.
+    const shown = vals.slice(0,25);
+    const listed = new Set(shown.map(pair=>pair[0]));
+    for (const v of (active[key] || [])){
+      if (!listed.has(v)) shown.push([v, null]);
+    }
+
+    shown.forEach(pair=>{
+      const [v, count] = pair;
       const el = document.createElement('div');
-      el.className = 'fv';
-      el.innerHTML = '<span></span><span class="c">' + n + '</span>';
+      el.className = 'fv' + ((active[key] && active[key].has(v)) ? ' on' : '');
+      el.innerHTML = '<span></span><span class="c"></span>';
       el.firstChild.textContent = v;
+      el.lastChild.textContent = count === null ? '' : count;
       el.onclick = ()=>{
         active[key] = active[key] || new Set();
         active[key].has(v) ? active[key].delete(v) : active[key].add(v);
@@ -918,6 +963,7 @@ function buildFacets(){
       box.appendChild(el);
     });
   }
+  box.scrollTop = wasAt;
 }
 
 function matches(m, terms){
@@ -1004,7 +1050,7 @@ async function readState(){
 
   const msId = p.get('ms');
   if (msId){
-    const m = corpus.find(x => x.id === msId);
+    const m = webMode ? { id: msId } : localCorpus.find(x => x.id === msId);
     if (m){
       restoring = false;
       const folio = p.get('f'), pageNo = p.get('p');
@@ -1027,18 +1073,15 @@ async function readState(){
 
 /* ---------------------------------------------------------------------
    TEXT SEARCH
-   The transcriptions run to about a gigabyte, so they cannot be loaded and
-   there is no server to ask. Instead the index is split into thousands of
-   small files by the first letters of each word. A search fetches only the
-   files its own words need, intersects the page lists, then reads those few
-   pages to find the exact wording and quote the line.
+   Five million lines are indexed in Elasticsearch, one nested document each,
+   so a search is one request and comes back with the line that matched, its
+   box on the image and the words to mark. What used to be thousands of little
+   shard files fetched and intersected in the browser is now the cluster's job.
 --------------------------------------------------------------------- */
-function searchBase(){ return DATA_BASE + 'search/'; }
 let searchMode = 'cat';
-let pageTable = null;          // loaded on first text search
-let shardCache = {};
 let searchToken = 0;
 let highlightPhrase = '';   // marked in the page once a hit is opened
+let focusLine = null;       // the line a search hit landed on, panned to on open
 
 function foldMap(s){
   /* Folding strips vowel points and unifies final letters, so positions in the
@@ -1083,44 +1126,14 @@ function markPhrase(el, text, phrase){
   return true;
 }
 
-function shardName(w){
-  const p = w.length >= 3 ? w.slice(0,3) : w.slice(0,2);
-  let s = '';
-  for (const c of p) s += c.charCodeAt(0).toString(16).padStart(4,'0');
-  return s;
-}
-
-async function getShard(w){
-  const n = shardName(w);
-  if (n in shardCache) return shardCache[n];
-  try{
-    const r = await fetch(searchBase() + 'words/' + n + '.json', {cache:'force-cache'});
-    shardCache[n] = r.ok ? await r.json() : {};
-  }catch(e){ shardCache[n] = {}; }
-  return shardCache[n];
-}
-
-async function getPageTable(){
-  if (pageTable) return pageTable;
-  const r = await fetch(searchBase() + 'pages.json', {cache:'force-cache'});
-  pageTable = await r.json();
-  return pageTable;
-}
-
-function ungap(gaps){
-  const out = []; let cur = 0;
-  for (const g of gaps){ cur += g; out.push(cur); }
-  return out;
-}
-
 function setSearchMode(m){
   searchMode = m;
   document.getElementById('modeCat').setAttribute('aria-pressed', m==='cat');
   document.getElementById('modeTxt').setAttribute('aria-pressed', m==='txt');
   document.getElementById('topq').placeholder = m === 'txt'
     ? 'Search the transcriptions \u2014 a word or a phrase\u2026'
-    : 'Search ' + corpus.length + ' manuscripts \u2014 title, shelfmark, scribe, script, date\u2026';
-  document.querySelectorAll('#facets').forEach(e=>e.style.display = m==='txt' ? 'none':'');
+    : 'Search ' + corpusCount + ' manuscripts \u2014 title, shelfmark, scribe, script, date\u2026';
+  document.body.classList.toggle('textmode', m === 'txt');
   runSearch();
 }
 document.getElementById('copyLink').onclick = async ()=>{
@@ -1148,183 +1161,210 @@ async function runTextSearch(){
   const token = ++searchToken;
   const q = document.getElementById('topq').value.trim();
   const list = document.getElementById('rlist');
-  const phrase = fold(q);
-  const words = phrase.split(' ').filter(w=>w.length >= 2);
 
-  if (!words.length){
+  if (q.length < 2){
     list.innerHTML = '<div class="empty">Type a word or a phrase to search the transcriptions.</div>';
-    document.getElementById('rcount').textContent = '\u2014';
+    setCount('—');
+    return;
+  }
+  if (!webMode){
+    list.innerHTML = '<div class="empty">Searching the transcriptions needs the server. '
+      + 'A picked folder can be read page by page, but not searched.</div>';
+    setCount('—');
     return;
   }
 
-  list.innerHTML = '<div class="working">searching\u2026</div>';
+  list.innerHTML = '<div class="working">searching…</div>';
 
-  // The rarest word narrows the search fastest, so start from the shortest
-  // page list and intersect the others into it.
-  // The index holds whole words, so a half-typed one would find nothing. Treat
-  // the last word as a prefix: since shards are keyed by a word's first three
-  // letters, every word starting with that prefix is already in the one file
-  // we would fetch anyway, so this costs nothing extra.
-  let sets = [];
-  for (let wi = 0; wi < words.length; wi++){
-    const w = words[wi];
-    const isLast = wi === words.length - 1 && !/\s$/.test(phrase);
-    const sh = await getShard(w);
+  let d;
+  try{
+    const r = await fetch(API_BASE + 'search?q=' + encodeURIComponent(q) + '&size=60');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    d = await r.json();
+  }catch(err){
     if (token !== searchToken) return;
-
-    if (isLast && w.length >= 3){
-      // Always widen the word being typed, even when it happens to be a word
-      // in its own right: the transcriptions are full of short accidental
-      // words, and stopping at an exact match would hide every longer word
-      // the reader is in the middle of typing.
-      const union = new Set();
-      for (const k in sh){
-        if (k.startsWith(w)) for (const p of ungap(sh[k])) union.add(p);
-      }
-      if (union.size){ sets.push(union); continue; }
-    }
-    if (w in sh){
-      sets.push(new Set(ungap(sh[w])));
-      continue;
-    }
-    // a word that is neither indexed nor a usable prefix cannot narrow anything
-  }
-
-  if (!sets.length){
-    list.innerHTML = '<div class="empty">Nothing found. The words may not appear, '
-      + 'or may be too common to index.</div>';
-    document.getElementById('rcount').textContent = '0';
+    list.innerHTML = '<div class="empty">The transcriptions could not be searched ('
+      + err.message + ').</div>';
+    setCount('0');
     return;
   }
-  sets.sort((a,b)=>a.size-b.size);
-  let cand = sets[0];
-  for (let i=1;i<sets.length;i++){
-    const next = new Set();
-    for (const p of cand) if (sets[i].has(p)) next.add(p);
-    cand = next;
-  }
-
-  const ids = [...cand].sort((a,b)=>a-b);
-  if (!ids.length){
-    list.innerHTML = '<div class="empty">Those words do not appear on the same page.</div>';
-    document.getElementById('rcount').textContent = '0';
-    return;
-  }
-
-  const tbl = await getPageTable();
   if (token !== searchToken) return;
-
-  // Read the candidate pages and keep only the lines that really contain the
-  // phrase: the index works word by word and cannot tell word order.
-  const CAP = 80;
-  const hits = [];
-  list.innerHTML = '<div class="working">reading ' + Math.min(ids.length, CAP)
-                 + ' of ' + ids.length + ' pages\u2026</div>';
-
-  for (const pid of ids.slice(0, CAP)){
-    if (token !== searchToken) return;
-    const [mi, folio, file] = tbl.pages[pid];
-    const mid = tbl.ms[mi];
-    try{
-      const r = await fetch(DATA_BASE + mid + '/' + file, {cache:'force-cache'});
-      if (!r.ok) continue;
-      const d = await r.json();
-      for (const ln of (d.l || [])){
-        if (fold(ln[6]).indexOf(phrase) !== -1){
-          hits.push({mid, folio, file, text: ln[6]});
-          break;
-        }
-      }
-    }catch(e){ /* skip a page that will not load */ }
-  }
-
-  if (token !== searchToken) return;
-  renderTextHits(hits, ids.length, CAP);
+  renderTextHits(d);
 }
 
-function renderTextHits(hits, total, cap){
+/* The server marks a match by cutting the line into pieces rather than by
+   sending HTML back. The browser builds text nodes from them, so nothing a
+   manuscript contains can put markup into this page. */
+function paintParts(el, parts, plain){
+  if (!parts || !parts.length){ el.textContent = plain || ''; return; }
+  parts.forEach(pair=>{
+    const [t, hot] = pair;
+    if (hot){
+      const m = document.createElement('mark');
+      m.textContent = t;
+      el.appendChild(m);
+    } else {
+      el.appendChild(document.createTextNode(t));
+    }
+  });
+}
+
+function renderTextHits(d){
   const list = document.getElementById('rlist');
-  const q = fold(document.getElementById('topq').value.trim());
+  const hits = d.results || [];
   list.innerHTML = '';
-  document.getElementById('rcount').textContent =
-    hits.length + (total > cap ? ' of ' + total + ' pages' : '');
-  const tc = document.getElementById('topcount');
-  if (tc) tc.textContent = document.getElementById('rcount').textContent;
+  setCount(d.total > hits.length ? hits.length + ' of ' + d.total : String(hits.length));
 
   if (!hits.length){
-    list.innerHTML = '<div class="empty">The words appear on the same page, '
-      + 'but not next to each other.</div>';
+    list.innerHTML = '<div class="empty">Nothing found. Those words may not appear '
+      + 'in the transcriptions, or not together in one line.</div>';
     return;
   }
 
-  const byId = {};
-  corpus.forEach(m=>{ byId[m.id] = m; });
+  // The server falls back to the same words in any order when the phrase
+  // itself is not there. Say so, rather than quietly showing something else.
+  if (d.mode === 'words'){
+    const note = document.createElement('div');
+    note.className = 'empty';
+    note.textContent = 'Not found as a phrase. These lines hold all of those words.';
+    list.appendChild(note);
+  }
 
   hits.forEach(h=>{
-    const m = byId[h.mid] || {};
+    const first = (h.lines || [])[0] || { text:'', parts:[], n:null };
     const row = document.createElement('div');
     row.className = 'hit';
 
     const sh = document.createElement('div');
-    sh.className = 'sh'; sh.textContent = m.shelfmark || h.mid;
+    sh.className = 'sh'; sh.textContent = h.shelfmark || h.ms_id;
+
     const fo = document.createElement('div');
-    fo.className = 'fo'; fo.textContent = h.folio ? 'f. ' + h.folio : '';
+    fo.className = 'fo';
+    fo.textContent = h.folio ? 'f. ' + h.folio
+                   : (h.page_no ? 'p. ' + h.page_no : '');
 
     const ln = document.createElement('div');
     ln.className = 'ln';
-    markPhrase(ln, h.text, q);
+    paintParts(ln, first.parts, first.text);
 
     row.append(sh, fo, ln);
     row.onclick = ()=>{
-      highlightPhrase = q;
-      if (m.id) openManuscript(m, h.file);
+      highlightPhrase = fold(document.getElementById('topq').value.trim());
+      focusLine = (first.i === null || first.i === undefined) ? null : first.i;
+      openManuscript({ id: h.ms_id, shelfmark: h.shelfmark,
+                       title: h.title, year: h.year }, h.file);
     };
     list.appendChild(row);
   });
 
-  if (total > cap){
+  if (d.total > hits.length){
     const more = document.createElement('div');
     more.className = 'empty';
-    more.textContent = 'Showing the first ' + cap + ' pages of ' + total
+    more.textContent = 'Showing the first ' + hits.length + ' pages of ' + d.total
                      + '. Narrow the phrase to see fewer.';
     list.appendChild(more);
   }
+}
+
+/* ---------------------------------------------------------------------
+   BROWSE: the catalogue, answered by the server
+   Metadata search and its facet counts are one request. The counts come back
+   narrowed by every OTHER facet, so the panel shows what is still reachable
+   from where the reader now stands, which a fixed list never could.
+--------------------------------------------------------------------- */
+let catToken = 0;
+
+function setCount(label){
+  document.getElementById('rcount').textContent = label;
+  const tc = document.getElementById('topcount');
+  if (tc) tc.textContent = label;
+}
+
+function joinField(v){
+  return Array.isArray(v) ? v.join(' · ') : (v || '');
 }
 
 function runSearch(){
   writeState();
   if (searchMode === 'txt'){ runTextSearch(); return; }
   highlightPhrase = '';
+  focusLine = null;
+  if (webMode) runCatalogueSearch(); else runCatalogueLocal();
+}
+
+async function runCatalogueSearch(){
+  const token = ++catToken;
+  const q = document.getElementById('q').value.trim();
+
+  const p = new URLSearchParams();
+  if (q) p.set('q', q);
+  for (const k in active){
+    if (active[k] && active[k].size) p.set(k, [...active[k]].join('|'));
+  }
+  p.set('size', '400');   // the catalogue is 349 records; fetch it whole
+
+  const list = document.getElementById('rlist');
+  let d;
+  try{
+    const r = await fetch(API_BASE + 'manuscripts?' + p.toString());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    d = await r.json();
+  }catch(err){
+    if (token !== catToken) return;
+    list.innerHTML = '<div class="empty">The catalogue could not be searched ('
+      + err.message + ').</div>';
+    setCount('0');
+    return;
+  }
+  if (token !== catToken) return;
+
+  // `id` is what everything downstream opens a manuscript by; the index calls
+  // it ms_id, because _id is Elasticsearch's own.
+  corpus = (d.results || []).map(m => Object.assign({}, m, { id: m.ms_id || m.id }));
+  if (d.facets){ facets = d.facets; buildFacets(); }
+  renderCatalogue(corpus, d.total);
+}
+
+function runCatalogueLocal(){
   const q = document.getElementById('q').value.trim();
   const terms = fold(q).split(' ').filter(Boolean);
-  const hits = corpus.filter(m=>matches(m, terms));
+  const hits = localCorpus.filter(m => matches(m, terms));
+  corpus = hits;
+  renderCatalogue(hits, localCorpus.length);
+}
 
-  const label = hits.length + ' of ' + corpus.length;
+function renderCatalogue(items, total){
+  const shown = items.length;
+  const label = (total === null || total === shown)
+              ? String(shown) : shown + ' of ' + total;
   document.getElementById('rcount').textContent = label;
+
   const tc = document.getElementById('topcount');
-  if (tc) tc.textContent = (document.getElementById('topq').value.trim() ||
-                            Object.keys(active).some(k=>active[k] && active[k].size))
-                            ? label : '';
+  const filtering = document.getElementById('topq').value.trim()
+                 || Object.keys(active).some(k => active[k] && active[k].size);
+  if (tc) tc.textContent = filtering ? label : '';
 
   const list = document.getElementById('rlist');
   list.innerHTML = '';
-  if (!hits.length){
+  if (!shown){
     list.innerHTML = '<div class="empty">Nothing matches those filters.</div>';
     return;
   }
-  hits.slice(0,400).forEach(m=>{
+
+  items.forEach(m=>{
     const row = document.createElement('div');
     row.className = 'ms';
 
     const sh = document.createElement('div');
-    sh.className = 'sh'; sh.textContent = m.shelfmark || m.alma;
+    sh.className = 'sh'; sh.textContent = m.shelfmark || m.alma || m.id;
 
     const mid = document.createElement('div');
     const ti = document.createElement('div');
-    ti.className = /[\u05D0-\u05EA]/.test(m.title||'') ? 'ti' : 'lat';
+    ti.className = /[א-ת]/.test(m.title||'') ? 'ti' : 'lat';
     ti.textContent = m.title || '(untitled)';
     mid.appendChild(ti);
-    const tags = [m.script, m.genre, m.persons].filter(Boolean).join(' \u00b7 ');
+    const tags = [joinField(m.script), joinField(m.genre), m.persons]
+                 .filter(Boolean).join(' · ');
     if (tags){
       const t = document.createElement('div');
       t.className = 'tags'; t.textContent = tags.slice(0,110);
@@ -1341,10 +1381,12 @@ function runSearch(){
     row.onclick = ()=>openManuscript(m);
     list.appendChild(row);
   });
-  if (hits.length > 400){
+
+  if (total !== null && total > shown){
     const more = document.createElement('div');
     more.className = 'empty';
-    more.textContent = 'Showing the first 400. Narrow the search to see the rest.';
+    more.textContent = 'Showing the first ' + shown + ' of ' + total
+                     + '. Narrow the search to see the rest.';
     list.appendChild(more);
   }
 }
@@ -1379,15 +1421,19 @@ async function openManuscript(m, wantFile){
 
 async function openManuscriptWeb(m, wantFile){
   setStatus('loading ' + (m.shelfmark || m.id) + '\u2026');
+  const base = API_BASE + 'manuscripts/' + encodeURIComponent(m.id);
   try{
-    const r = await fetch(DATA_BASE + m.id + '/pages.json', {cache:'force-cache'});
+    const r = await fetch(base);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     if (!d.pages || !d.pages.length) throw new Error('no pages listed');
+    // A link may name a manuscript the reader never saw in a result list, so
+    // take the catalogue record from the answer rather than from the row.
+    m = Object.assign({}, m, d.manuscript || {}, { id: m.id });
     bundle = d.pages.map(p=>({
-      name: p.j.replace(/\.json$/i,''),
-      url: DATA_BASE + m.id + '/' + p.j,
-      folio: p.f, imgFile: null
+      name: p.file.replace(/\.json$/i,''),
+      url: base + '/pages/' + encodeURIComponent(p.file),
+      folio: p.folio, imgFile: null
     }));
   }catch(err){
     notice('Could not open that manuscript',
@@ -1444,13 +1490,13 @@ document.getElementById('q').addEventListener('input', ()=>{
 const topq = document.getElementById('topq');
 topq.addEventListener('input', ()=>{
   document.getElementById('q').value = topq.value;
-  if (!document.body.classList.contains('browsing') && corpus.length){
+  if (!document.body.classList.contains('browsing') && corpusCount){
     document.body.classList.add('browsing');
   }
   runSearch();
 });
 topq.addEventListener('focus', ()=>{
-  if (corpus.length) document.body.classList.add('browsing');
+  if (corpusCount) document.body.classList.add('browsing');
 });
 topq.addEventListener('keydown', e=>{
   if (e.key === 'Escape'){ topq.blur(); document.body.classList.remove('browsing'); }
@@ -1573,44 +1619,59 @@ mainBtn.onclick = ()=>{
 
 /* ---------------------------------------------------------------------
    WEB MODE
-   Served from a site, the corpus sits beside this file rather than being
-   handed over by a folder picker. Load the catalogue at startup and fetch
-   each manuscript's pages when the reader opens it. Falling back to the
-   picker keeps the file usable offline, which is what a presentation wants.
+   Served from a site, nothing about the corpus is loaded up front: the
+   catalogue, the page lists, the pages themselves and every search are
+   answered by the API in front of Elasticsearch. Only the shape of the corpus
+   is asked for at startup, so the reader knows what they are looking at.
+
+   Falling back to the folder picker keeps this file usable with no server at
+   all, which is what a presentation wants; that path can browse and read, but
+   not search the transcriptions.
 --------------------------------------------------------------------- */
-const DATA_BASE = 'data/';          // where the corpus was published
+const API_BASE = 'api/';            // the search API, beside this file
 let webMode = false;
 
 async function bootFromServer(){
   try{
-    const r = await fetch(DATA_BASE + 'index-meta.json', {cache:'force-cache'});
+    const r = await fetch(API_BASE + 'info');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
-    corpus = (d.manuscripts || []).map(m=>{
-      const parts = String(m.id||'').split('_');
-      return Object.assign({}, m, { ie: parts.length>1 ? parts.pop() : null });
-    });
+    if (d.error) throw new Error(d.error);
+
+    corpusCount = d.manuscripts || 0;
     facets = d.facets || {};
     webMode = true;
     document.body.classList.add('web');
     buildFacets();
-    runSearch();
-    topq.placeholder = 'Search ' + corpus.length
+    topq.placeholder = 'Search ' + corpusCount
       + ' manuscripts \u2014 title, shelfmark, scribe, script, date\u2026';
-    setStatus(corpus.length + ' manuscripts', 'ok');
+    setStatus(corpusCount + ' manuscripts, ' + (d.pages || 0).toLocaleString()
+              + ' pages', 'ok');
     // A link may name a manuscript and page; open that rather than the list.
     const restored = await readState();
     restoring = false;
-    if (!restored) document.body.classList.add('browsing');
+    if (!restored){
+      document.body.classList.add('browsing');
+      // readState has already searched when the address carried a query.
+      if (!openedWith) runSearch();
+    }
     return true;
   }catch(err){
+    bootError = err.message;
     return false;
   }
 }
 
+let bootError = '';
+
 bootFromServer().then(ok=>{
   if (!ok){
-    setStatus('open a corpus folder to begin');
+    setStatus('no search server \u2014 open a corpus folder to begin', 'bad');
+    notice('The search server did not answer',
+      'This viewer reads the corpus through its API at <code>' + API_BASE + '</code>, '
+      + 'which could not be reached' + (bootError ? ' (<code>' + bootError + '</code>)' : '')
+      + '. Check that the Django service and Elasticsearch are running, or pick a '
+      + 'corpus folder to browse it offline.');
   }
 });
 </script>

@@ -1,0 +1,38 @@
+# systemd unit for the search API.
+#
+#   cp deploy/midrash-api.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now midrash-api
+#
+# Credentials live in the EnvironmentFile, not in this unit and not in the
+# repository. Keep it 0600 and owned by root.
+
+[Unit]
+Description=Midrash BnF viewer: search API
+After=network.target elasticsearch.service
+Wants=elasticsearch.service
+
+[Service]
+Type=notify
+User=midrash
+Group=midrash
+WorkingDirectory=/srv/midrash-bnf-viewer/server
+EnvironmentFile=/etc/midrash/api.env
+ExecStart=/srv/midrash-bnf-viewer/.venv/bin/gunicorn \
+    --workers 3 \
+    --threads 4 \
+    --bind 127.0.0.1:8001 \
+    --access-logfile - \
+    --error-logfile - \
+    midrash.wsgi:application
+Restart=on-failure
+RestartSec=5
+
+# It reads one HTML file and talks to one port on localhost; nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/srv/midrash-bnf-viewer
+
+[Install]
+WantedBy=multi-user.target

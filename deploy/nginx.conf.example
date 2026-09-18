@@ -1,0 +1,65 @@
+# nginx in front of the viewer.
+#
+# Two things are served: index.html, which is the whole viewer, and /api/,
+# which is Django. Elasticsearch is NOT among them, and must not be: anything
+# that may run a search may also run _delete_by_query, and the cluster has no
+# way to tell a reader from a vandal. Keep it bound to localhost.
+#
+#   cp deploy/nginx.conf.example /etc/nginx/sites-available/midrash
+#   ln -s /etc/nginx/sites-available/midrash /etc/nginx/sites-enabled/
+#   nginx -t && systemctl reload nginx
+
+upstream midrash_api {
+    server 127.0.0.1:8001 fail_timeout=0;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name manuscripts.example.org;
+
+    # certbot will move this to 443; until then everything below still applies.
+    root /srv/midrash-bnf-viewer;
+
+    access_log /var/log/nginx/midrash.access.log;
+    error_log  /var/log/nginx/midrash.error.log;
+
+    client_max_body_size 1m;          # nothing is ever uploaded
+
+    gzip on;
+    gzip_types application/json text/html text/css application/javascript;
+    gzip_min_length 1024;
+
+    # ---- the viewer -------------------------------------------------------
+    location = / {
+        try_files /index.html =404;
+        add_header Cache-Control "no-cache";
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+    }
+
+    # ---- the search API ---------------------------------------------------
+    location /api/ {
+        proxy_pass         http://midrash_api;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 30s;
+
+        # Answers are the same for everyone and change only when the corpus is
+        # re-imported, so a short shared cache absorbs the typing.
+        proxy_cache_valid 200 30s;
+    }
+
+    # Elasticsearch and Kibana are deliberately absent. If you want Kibana
+    # reachable, give it its own server block behind authentication -- never a
+    # location under the public site.
+
+    location / {
+        return 404;
+    }
+}
