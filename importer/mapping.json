@@ -1,0 +1,84 @@
+{
+  "settings": {
+    "index": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "refresh_interval": "30s"
+    },
+    "analysis": {
+      "char_filter": {
+        "strip_points": {
+          "type": "pattern_replace",
+          "pattern": "[\\u0591-\\u05C7]",
+          "replacement": ""
+        },
+        "strip_marks": {
+          "type": "pattern_replace",
+          "pattern": "[\\u05F3\\u05F4\"'‘’“”·]",
+          "replacement": " "
+        },
+        "unify_finals": {
+          "type": "mapping",
+          "mappings": [
+            "ך => כ",
+            "ם => מ",
+            "ן => נ",
+            "ף => פ",
+            "ץ => צ"
+          ]
+        }
+      },
+      "analyzer": {
+        "hebrew_fold": {
+          "type": "custom",
+          "char_filter": ["strip_points", "strip_marks", "unify_finals"],
+          "tokenizer": "standard",
+          "filter": ["lowercase"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "doc_type":  { "type": "keyword" },
+      "ms_id":     { "type": "keyword" },
+      "ms_order":  { "type": "integer" },
+
+      "alma":      { "type": "keyword", "copy_to": "meta_all" },
+      "ark":       { "type": "keyword", "copy_to": "meta_all" },
+      "shelfmark": { "type": "keyword", "copy_to": "meta_all" },
+      "title":     { "type": "text", "analyzer": "hebrew_fold", "copy_to": "meta_all" },
+      "date":      { "type": "text", "analyzer": "hebrew_fold", "copy_to": "meta_all" },
+      "year":      { "type": "integer" },
+      "language":  { "type": "keyword", "copy_to": "meta_all" },
+      "script":    { "type": "keyword", "copy_to": "meta_all" },
+      "genre":     { "type": "keyword", "copy_to": "meta_all" },
+      "subject":   { "type": "keyword", "copy_to": "meta_all" },
+      "persons":   { "type": "text", "analyzer": "hebrew_fold", "copy_to": "meta_all" },
+      "extent":    { "type": "text", "analyzer": "hebrew_fold", "copy_to": "meta_all" },
+      "n_pages":   { "type": "integer" },
+      "n_lines":   { "type": "integer" },
+      "meta_all":  { "type": "text", "analyzer": "hebrew_fold" },
+
+      "page_no":   { "type": "integer" },
+      "folio":     { "type": "keyword" },
+      "file":      { "type": "keyword" },
+      "iiif":      { "type": "keyword", "index": false, "doc_values": false },
+      "image":     { "type": "keyword", "index": false, "doc_values": false },
+      "width":     { "type": "integer", "index": false, "doc_values": false },
+      "height":    { "type": "integer", "index": false, "doc_values": false },
+
+      "lines": {
+        "type": "nested",
+        "properties": {
+          "n":    { "type": "integer", "index": false, "doc_values": false },
+          "text": { "type": "text", "analyzer": "hebrew_fold" },
+          "box":  { "type": "integer", "index": false, "doc_values": false },
+          "conf": { "type": "float",   "index": false, "doc_values": false },
+          "main": { "type": "boolean", "index": false, "doc_values": false }
+        }
+      }
+    }
+  }
+}

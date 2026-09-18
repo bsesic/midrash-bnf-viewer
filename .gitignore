@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+server/.env
+server/staticfiles/
+.DS_Store
